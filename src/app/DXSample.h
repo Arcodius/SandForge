@@ -29,6 +29,9 @@ public:
     // Samples override the event handlers to handle specific messages.
     virtual void OnKeyDown(UINT8 /*key*/)   {}
     virtual void OnKeyUp(UINT8 /*key*/)     {}
+    virtual void OnMouseMove(int /*x*/, int /*y*/) {}
+    virtual void OnMouseButton(bool /*pressed*/, int /*x*/, int /*y*/) {}
+    virtual void OnMouseWheel(short /*delta*/) {}
 
     // Accessors.
     UINT GetWidth() const           { return m_width; }

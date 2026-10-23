@@ -27,5 +27,12 @@
 #include <DirectXMath.h>
 
 #include <string>
+#include <vector>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <wrl.h>
 #include <shellapi.h>
+#include <windowsx.h>

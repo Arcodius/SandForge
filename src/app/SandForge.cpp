@@ -4,17 +4,28 @@
 SandForge::SandForge(UINT width, UINT height, std::wstring name) :
     DXSample(width, height, name),
     m_scissorRect{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) },
+    m_mappedCameraConstants(nullptr),
     m_rtvDescriptorSize(0),
     m_frameIndex(0),
     m_fenceEvent(nullptr),
     m_fenceValue(0),
-    m_isMinimized(false)
+    m_isMinimized(false),
+    m_keys{},
+    m_looking(false),
+    m_lastMouseX(0),
+    m_lastMouseY(0),
+    m_cameraPosition(0.0f, 0.0f, -3.0f),
+    m_cameraYaw(0.0f),
+    m_cameraPitch(0.0f),
+    m_fieldOfView(DirectX::XM_PIDIV4),
+    m_previousUpdate(std::chrono::steady_clock::now())
 {
 }
 
 void SandForge::OnInit()
 {
     LoadPipeline();
+    LoadAssets();
 }
 
 void SandForge::LoadPipeline()
@@ -105,6 +116,12 @@ void SandForge::LoadPipeline()
         rtvHandle.ptr += m_rtvDescriptorSize;
     }
 
+    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+    dsvHeapDesc.NumDescriptors = 1;
+    dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    ThrowIfFailed(m_device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_dsvHeap)));
+    CreateDepthBuffer(m_width, m_height);
+
     ThrowIfFailed(m_device->CreateCommandAllocator(
         D3D12_COMMAND_LIST_TYPE_DIRECT,
         IID_PPV_ARGS(&m_commandAllocator)));
@@ -127,8 +144,412 @@ void SandForge::LoadPipeline()
     m_scissorRect = { 0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height) };
 }
 
+void SandForge::LoadAssets()
+{
+    LoadCubeMesh();
+
+    ComPtr<ID3DBlob> vertexShader;
+    ComPtr<ID3DBlob> pixelShader;
+    ComPtr<ID3DBlob> errors;
+
+    const std::wstring vertexShaderPath = GetAssetFullPath(L"shaders\\cube_vs.hlsl");
+    HRESULT hr = D3DCompileFromFile(
+        vertexShaderPath.c_str(),
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "VSMain",
+        "vs_5_0",
+        D3DCOMPILE_ENABLE_STRICTNESS,
+        0,
+        &vertexShader,
+        &errors);
+    if (FAILED(hr))
+    {
+        if (errors != nullptr)
+        {
+            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
+        }
+        ThrowIfFailed(hr);
+    }
+    errors.Reset();
+    const std::wstring pixelShaderPath = GetAssetFullPath(L"shaders\\cube_ps.hlsl");
+    hr = D3DCompileFromFile(
+        pixelShaderPath.c_str(),
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "PSMain",
+        "ps_5_0",
+        D3DCOMPILE_ENABLE_STRICTNESS,
+        0,
+        &pixelShader,
+        &errors);
+    if (FAILED(hr))
+    {
+        if (errors != nullptr)
+        {
+            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
+        }
+        ThrowIfFailed(hr);
+    }
+
+    D3D12_ROOT_PARAMETER rootParameter = {};
+    rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParameter.Descriptor.ShaderRegister = 0;
+    rootParameter.Descriptor.RegisterSpace = 0;
+    rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+    rootSignatureDesc.NumParameters = 1;
+    rootSignatureDesc.pParameters = &rootParameter;
+    rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> signature;
+    errors.Reset();
+    ThrowIfFailed(D3D12SerializeRootSignature(
+        &rootSignatureDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &signature,
+        &errors));
+    ThrowIfFailed(m_device->CreateRootSignature(
+        0,
+        signature->GetBufferPointer(),
+        signature->GetBufferSize(),
+        IID_PPV_ARGS(&m_rootSignature)));
+
+    const D3D12_INPUT_ELEMENT_DESC inputLayout[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12,
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc = {};
+    pipelineDesc.InputLayout = { inputLayout, _countof(inputLayout) };
+    pipelineDesc.pRootSignature = m_rootSignature.Get();
+    pipelineDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
+    pipelineDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
+    pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pipelineDesc.RasterizerState.DepthClipEnable = TRUE;
+    pipelineDesc.BlendState.AlphaToCoverageEnable = FALSE;
+    pipelineDesc.BlendState.IndependentBlendEnable = FALSE;
+    const D3D12_RENDER_TARGET_BLEND_DESC defaultBlend =
+    {
+        FALSE, FALSE,
+        D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
+        D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
+        D3D12_LOGIC_OP_NOOP,
+        D3D12_COLOR_WRITE_ENABLE_ALL
+    };
+    for (auto& renderTarget : pipelineDesc.BlendState.RenderTarget)
+    {
+        renderTarget = defaultBlend;
+    }
+    pipelineDesc.DepthStencilState.DepthEnable = TRUE;
+    pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    pipelineDesc.DepthStencilState.StencilEnable = FALSE;
+    pipelineDesc.SampleMask = UINT_MAX;
+    pipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipelineDesc.NumRenderTargets = 1;
+    pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pipelineDesc.SampleDesc.Count = 1;
+    ThrowIfFailed(m_device->CreateGraphicsPipelineState(
+        &pipelineDesc,
+        IID_PPV_ARGS(&m_pipelineState)));
+
+    D3D12_HEAP_PROPERTIES uploadHeap = {};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bufferDesc = {};
+    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDesc.Height = 1;
+    bufferDesc.DepthOrArraySize = 1;
+    bufferDesc.MipLevels = 1;
+    bufferDesc.SampleDesc.Count = 1;
+    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    bufferDesc.Width = m_cubeVertices.size() * sizeof(Vertex);
+    ThrowIfFailed(m_device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_vertexBuffer)));
+
+    void* mappedData = nullptr;
+    D3D12_RANGE readRange = { 0, 0 };
+    ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, &mappedData));
+    memcpy(mappedData, m_cubeVertices.data(), m_cubeVertices.size() * sizeof(Vertex));
+    m_vertexBuffer->Unmap(0, nullptr);
+    m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
+    m_vertexBufferView.StrideInBytes = sizeof(Vertex);
+    m_vertexBufferView.SizeInBytes = static_cast<UINT>(m_cubeVertices.size() * sizeof(Vertex));
+
+    bufferDesc.Width = m_cubeIndices.size() * sizeof(UINT32);
+    ThrowIfFailed(m_device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_indexBuffer)));
+    ThrowIfFailed(m_indexBuffer->Map(0, &readRange, &mappedData));
+    memcpy(mappedData, m_cubeIndices.data(), m_cubeIndices.size() * sizeof(UINT32));
+    m_indexBuffer->Unmap(0, nullptr);
+
+    m_indexBufferView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();
+    m_indexBufferView.Format = DXGI_FORMAT_R32_UINT;
+    m_indexBufferView.SizeInBytes = static_cast<UINT>(m_cubeIndices.size() * sizeof(UINT32));
+
+    bufferDesc.Width = sizeof(CameraConstants);
+    ThrowIfFailed(m_device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_cameraBuffer)));
+    ThrowIfFailed(m_cameraBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_mappedCameraConstants)));
+    UpdateCameraConstants();
+}
+
+void SandForge::LoadCubeMesh()
+{
+    const std::wstring meshPath = GetAssetFullPath(L"assets\\cube.obj");
+    std::ifstream meshFile(meshPath);
+    if (!meshFile)
+    {
+        throw std::runtime_error("Failed to open assets/cube.obj");
+    }
+
+    std::vector<Vertex> positions;
+    std::string line;
+    UINT lineNumber = 0;
+    while (std::getline(meshFile, line))
+    {
+        ++lineNumber;
+        std::istringstream stream(line);
+        std::string command;
+        stream >> command;
+        if (command.empty() || command[0] == '#')
+        {
+            continue;
+        }
+
+        if (command == "v")
+        {
+            Vertex vertex = {};
+            if (!(stream >> vertex.position.x >> vertex.position.y >> vertex.position.z
+                >> vertex.color.x >> vertex.color.y >> vertex.color.z))
+            {
+                throw std::runtime_error("Invalid vertex in assets/cube.obj at line " + std::to_string(lineNumber));
+            }
+            vertex.color.w = 1.0f;
+            positions.push_back(vertex);
+        }
+        else if (command == "f")
+        {
+            std::vector<UINT32> face;
+            std::string token;
+            while (stream >> token)
+            {
+                const size_t slash = token.find('/');
+                const std::string indexText = token.substr(0, slash);
+                const int objIndex = std::stoi(indexText);
+                const int resolvedIndex = objIndex > 0
+                    ? objIndex - 1
+                    : static_cast<int>(positions.size()) + objIndex;
+                if (resolvedIndex < 0 || static_cast<size_t>(resolvedIndex) >= positions.size())
+                {
+                    throw std::runtime_error("Invalid face index in assets/cube.obj at line " + std::to_string(lineNumber));
+                }
+                face.push_back(static_cast<UINT32>(resolvedIndex));
+            }
+            if (face.size() < 3)
+            {
+                throw std::runtime_error("Face has fewer than three vertices in assets/cube.obj at line " + std::to_string(lineNumber));
+            }
+
+            const UINT32 firstVertex = static_cast<UINT32>(m_cubeVertices.size());
+            for (const UINT32 index : face)
+            {
+                m_cubeVertices.push_back(positions[index]);
+            }
+            for (UINT32 i = 1; i + 1 < face.size(); ++i)
+            {
+                m_cubeIndices.push_back(firstVertex);
+                m_cubeIndices.push_back(firstVertex + i);
+                m_cubeIndices.push_back(firstVertex + i + 1);
+            }
+        }
+    }
+
+    if (m_cubeVertices.empty() || m_cubeIndices.empty())
+    {
+        throw std::runtime_error("assets/cube.obj contains no renderable mesh");
+    }
+}
+
+void SandForge::UpdateCameraConstants()
+{
+    const DirectX::XMVECTOR position = DirectX::XMLoadFloat3(&m_cameraPosition);
+    const float cosPitch = cosf(m_cameraPitch);
+    const DirectX::XMVECTOR forward = DirectX::XMVectorSet(
+        sinf(m_cameraYaw) * cosPitch,
+        sinf(m_cameraPitch),
+        cosf(m_cameraYaw) * cosPitch,
+        0.0f);
+    const DirectX::XMVECTOR target = DirectX::XMVectorAdd(position, forward);
+    const DirectX::XMMATRIX view = DirectX::XMMatrixLookAtLH(
+        position,
+        target,
+        DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
+    const DirectX::XMMATRIX projection = DirectX::XMMatrixPerspectiveFovLH(
+        m_fieldOfView,
+        m_aspectRatio,
+        0.1f,
+        100.0f);
+    DirectX::XMStoreFloat4x4(
+        &m_mappedCameraConstants->viewProjection,
+        view * projection);
+}
+
+void SandForge::CreateDepthBuffer(UINT width, UINT height)
+{
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC depthDesc = {};
+    depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depthDesc.Width = width;
+    depthDesc.Height = height;
+    depthDesc.DepthOrArraySize = 1;
+    depthDesc.MipLevels = 1;
+    depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
+    depthDesc.SampleDesc.Count = 1;
+    depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_CLEAR_VALUE clearValue = {};
+    clearValue.Format = DXGI_FORMAT_D32_FLOAT;
+    clearValue.DepthStencil.Depth = 1.0f;
+
+    ThrowIfFailed(m_device->CreateCommittedResource(
+        &heapProperties,
+        D3D12_HEAP_FLAG_NONE,
+        &depthDesc,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        &clearValue,
+        IID_PPV_ARGS(&m_depthBuffer)));
+    m_device->CreateDepthStencilView(
+        m_depthBuffer.Get(),
+        nullptr,
+        m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+}
+
 void SandForge::OnUpdate()
 {
+    const auto now = std::chrono::steady_clock::now();
+    const float deltaTime = (std::min)(
+        std::chrono::duration<float>(now - m_previousUpdate).count(),
+        0.1f);
+    m_previousUpdate = now;
+
+    if (deltaTime <= 0.0f || m_isMinimized)
+    {
+        return;
+    }
+
+    const float forwardX = sinf(m_cameraYaw);
+    const float forwardZ = cosf(m_cameraYaw);
+    float moveX = 0.0f;
+    float moveY = 0.0f;
+    float moveZ = 0.0f;
+
+    if (m_keys['W'])
+    {
+        moveX += forwardX;
+        moveZ += forwardZ;
+    }
+    if (m_keys['S'])
+    {
+        moveX -= forwardX;
+        moveZ -= forwardZ;
+    }
+    if (m_keys['D'])
+    {
+        moveX += forwardZ;
+        moveZ -= forwardX;
+    }
+    if (m_keys['A'])
+    {
+        moveX -= forwardZ;
+        moveZ += forwardX;
+    }
+    if (m_keys['E'])
+    {
+        moveY += 1.0f;
+    }
+    if (m_keys['Q'])
+    {
+        moveY -= 1.0f;
+    }
+
+    const float moveLength = sqrtf(moveX * moveX + moveY * moveY + moveZ * moveZ);
+    if (moveLength > 0.0f)
+    {
+        constexpr float moveSpeed = 3.0f;
+        const float distance = moveSpeed * deltaTime / moveLength;
+        m_cameraPosition.x += moveX * distance;
+        m_cameraPosition.y += moveY * distance;
+        m_cameraPosition.z += moveZ * distance;
+    }
+
+    UpdateCameraConstants();
+}
+
+void SandForge::OnKeyDown(UINT8 key)
+{
+    m_keys[key] = true;
+}
+
+void SandForge::OnKeyUp(UINT8 key)
+{
+    m_keys[key] = false;
+}
+
+void SandForge::OnMouseMove(int x, int y)
+{
+    if (m_looking)
+    {
+        constexpr float radiansPerPixel = 0.004f;
+        m_cameraYaw += static_cast<float>(x - m_lastMouseX) * radiansPerPixel;
+        m_cameraPitch -= static_cast<float>(y - m_lastMouseY) * radiansPerPixel;
+        constexpr float pitchLimit = DirectX::XM_PIDIV2 - 0.01f;
+        m_cameraPitch = (std::clamp)(m_cameraPitch, -pitchLimit, pitchLimit);
+    }
+    m_lastMouseX = x;
+    m_lastMouseY = y;
+}
+
+void SandForge::OnMouseButton(bool pressed, int x, int y)
+{
+    m_looking = pressed;
+    m_lastMouseX = x;
+    m_lastMouseY = y;
+}
+
+void SandForge::OnMouseWheel(short delta)
+{
+    constexpr float radiansPerNotch = DirectX::XM_PI / 36.0f;
+    m_fieldOfView -= static_cast<float>(delta) / WHEEL_DELTA * radiansPerNotch;
+    m_fieldOfView = (std::clamp)(
+        m_fieldOfView,
+        DirectX::XM_PI / 9.0f,
+        DirectX::XM_PI / 1.8f);
+    UpdateCameraConstants();
 }
 
 void SandForge::OnRender()
@@ -172,10 +593,33 @@ void SandForge::PopulateCommandList()
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtvHandle.ptr += static_cast<SIZE_T>(m_frameIndex) * m_rtvDescriptorSize;
-    m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
     const float canvasColor[] = { 0.08f, 0.09f, 0.11f, 1.0f };
     m_commandList->ClearRenderTargetView(rtvHandle, canvasColor, 0, nullptr);
+    m_commandList->ClearDepthStencilView(
+        dsvHandle,
+        D3D12_CLEAR_FLAG_DEPTH,
+        1.0f,
+        0,
+        0,
+        nullptr);
+
+    m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
+    m_commandList->SetGraphicsRootConstantBufferView(
+        0,
+        m_cameraBuffer->GetGPUVirtualAddress());
+    m_commandList->SetPipelineState(m_pipelineState.Get());
+    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
+    m_commandList->IASetIndexBuffer(&m_indexBufferView);
+    m_commandList->DrawIndexedInstanced(
+        static_cast<UINT>(m_cubeIndices.size()),
+        1,
+        0,
+        0,
+        0);
 
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
@@ -230,6 +674,7 @@ void SandForge::Resize(UINT width, UINT height)
     {
         renderTarget.Reset();
     }
+    m_depthBuffer.Reset();
 
     ThrowIfFailed(m_swapChain->ResizeBuffers(
         FrameCount,
@@ -246,11 +691,13 @@ void SandForge::Resize(UINT width, UINT height)
         m_device->CreateRenderTargetView(m_renderTargets[i].Get(), nullptr, rtvHandle);
         rtvHandle.ptr += m_rtvDescriptorSize;
     }
+    CreateDepthBuffer(width, height);
 
     m_width = width;
     m_height = height;
     m_aspectRatio = static_cast<float>(width) / height;
     m_scissorRect = { 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
+    UpdateCameraConstants();
 }
 
 void SandForge::OnDestroy()
@@ -263,5 +710,10 @@ void SandForge::OnDestroy()
     {
         CloseHandle(m_fenceEvent);
         m_fenceEvent = nullptr;
+    }
+    if (m_cameraBuffer != nullptr && m_mappedCameraConstants != nullptr)
+    {
+        m_cameraBuffer->Unmap(0, nullptr);
+        m_mappedCameraConstants = nullptr;
     }
 }

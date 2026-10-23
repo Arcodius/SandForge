@@ -34,6 +34,16 @@ cmake_minimum_required(VERSION 3.25)
 target_link_libraries(SandForge PRIVATE
     Microsoft::DirectX-Headers
     d3d12
+    d3dcompiler
     dxgi
     dxguid
+)
+
+add_custom_command(TARGET SandForge POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:SandForge>/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+        "$<TARGET_FILE_DIR:SandForge>/shaders"
 )

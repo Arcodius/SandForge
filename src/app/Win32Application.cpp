@@ -120,6 +120,61 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
         }
         return 0;
 
+    case WM_MOUSEMOVE:
+        if (pSample)
+        {
+            pSample->OnMouseMove(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        }
+        return 0;
+
+    case WM_RBUTTONDOWN:
+        SetCapture(hWnd);
+        if (pSample)
+        {
+            pSample->OnMouseButton(true, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        }
+        return 0;
+
+    case WM_RBUTTONUP:
+        if (GetCapture() == hWnd)
+        {
+            ReleaseCapture();
+        }
+        if (pSample)
+        {
+            pSample->OnMouseButton(false, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        }
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        if (pSample)
+        {
+            pSample->OnMouseButton(false, 0, 0);
+        }
+        return 0;
+
+    case WM_MOUSEWHEEL:
+        if (pSample)
+        {
+            pSample->OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam));
+        }
+        return 0;
+
+    case WM_KILLFOCUS:
+        if (GetCapture() == hWnd)
+        {
+            ReleaseCapture();
+        }
+        if (pSample)
+        {
+            pSample->OnMouseButton(false, 0, 0);
+            for (UINT8 key = 0; key < 255; ++key)
+            {
+                pSample->OnKeyUp(key);
+            }
+        }
+        return 0;
+
     case WM_PAINT:
         {
             PAINTSTRUCT paintStruct = {};
