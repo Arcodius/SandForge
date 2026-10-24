@@ -26,11 +26,6 @@ target_include_directories(SandForge PRIVATE src)
 target_compile_definitions(SandForge PRIVATE NOMINMAX UNICODE _UNICODE)
 set_target_properties(SandForge PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
 
-cmake_minimum_required(VERSION 3.25)
-
-
-
-
 target_link_libraries(SandForge PRIVATE
     Microsoft::DirectX-Headers
     d3d12

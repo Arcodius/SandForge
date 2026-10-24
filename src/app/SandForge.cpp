@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "SandForge.h"
 
+#include "sim/Material.h"
+
 SandForge::SandForge(UINT width, UINT height, std::wstring name) :
     DXSample(width, height, name),
     m_scissorRect{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) },
@@ -18,7 +20,9 @@ SandForge::SandForge(UINT width, UINT height, std::wstring name) :
     m_cameraYaw(0.0f),
     m_cameraPitch(0.0f),
     m_fieldOfView(DirectX::XM_PIDIV4),
-    m_previousUpdate(std::chrono::steady_clock::now())
+    m_previousUpdate(std::chrono::steady_clock::now()),
+    m_viewMode(ViewMode::View2D),
+    m_mappedGridUpload(nullptr)
 {
 }
 
@@ -26,6 +30,8 @@ void SandForge::OnInit()
 {
     LoadPipeline();
     LoadAssets();
+    CreateGridResources();
+    LoadGridPipeline();
 }
 
 void SandForge::LoadPipeline()
@@ -144,53 +150,125 @@ void SandForge::LoadPipeline()
     m_scissorRect = { 0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height) };
 }
 
+void SandForge::LoadGridPipeline()
+{
+    ComPtr<ID3DBlob> vertexShader = CompileShader(L"shaders\\grid_vs.hlsl", "VSMain", "vs_5_0");
+    ComPtr<ID3DBlob> pixelShader = CompileShader(L"shaders\\grid_ps.hlsl", "PSMain", "ps_5_0");
+
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 1;
+    srvRange.BaseShaderRegister = 0; // t0
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER params[2] = {};
+    // The first argument is four constants
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.ShaderRegister = 0; // b0
+    params[0].Constants.Num32BitValues = sizeof(GridConstants) / 4;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    // The second argument is a pointer to descriptor table
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &srvRange;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // No vertex input: the fullscreen triangle is generated from SV_VertexID
+    D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+    rootSignatureDesc.NumParameters = _countof(params);
+    rootSignatureDesc.pParameters = params;
+    rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> errors;
+    HRESULT hr = D3D12SerializeRootSignature(
+        &rootSignatureDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &signature,
+        &errors);
+    if (FAILED(hr))
+    {
+        if (errors != nullptr)
+        {
+            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
+        }
+        ThrowIfFailed(hr);
+    }
+    ThrowIfFailed(m_device->CreateRootSignature(
+        0,
+        signature->GetBufferPointer(),
+        signature->GetBufferSize(),
+        IID_PPV_ARGS(&m_gridRootSignature)));
+
+    // PSO
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc = {};
+    pipelineDesc.InputLayout = { nullptr, 0 };
+    pipelineDesc.pRootSignature = m_gridRootSignature.Get();
+    pipelineDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() }; // shader in bytes
+    pipelineDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
+    pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // no back culling
+    pipelineDesc.RasterizerState.DepthClipEnable = FALSE;
+    pipelineDesc.BlendState.AlphaToCoverageEnable = FALSE; // no blending
+    pipelineDesc.BlendState.IndependentBlendEnable = FALSE;
+    const D3D12_RENDER_TARGET_BLEND_DESC defaultBlend =
+    {
+        FALSE, FALSE,
+        D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
+        D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
+        D3D12_LOGIC_OP_NOOP,
+        D3D12_COLOR_WRITE_ENABLE_ALL
+    };
+    for (auto& renderTarget : pipelineDesc.BlendState.RenderTarget)
+    {
+        renderTarget = defaultBlend;
+    }
+    pipelineDesc.DepthStencilState.DepthEnable = FALSE; // disable depth test for 2D
+    pipelineDesc.DepthStencilState.StencilEnable = FALSE;
+    pipelineDesc.SampleMask = UINT_MAX;
+    pipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; // draw triangle
+    pipelineDesc.NumRenderTargets = 1;
+    pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // Keep the same format as swapchain
+    pipelineDesc.DSVFormat = DXGI_FORMAT_UNKNOWN; // No need to bind DSV when recording 2D
+    pipelineDesc.SampleDesc.Count = 1;
+    ThrowIfFailed(m_device->CreateGraphicsPipelineState( // create PSO
+        &pipelineDesc,
+        IID_PPV_ARGS(&m_gridPipelineState)));
+}
+
+ComPtr<ID3DBlob> SandForge::CompileShader(LPCWSTR assetName, LPCSTR entryPoint, LPCSTR target)
+{
+    ComPtr<ID3DBlob> shader;
+    ComPtr<ID3DBlob> errors;
+    const std::wstring shaderPath = GetAssetFullPath(assetName);
+    HRESULT hr = D3DCompileFromFile(
+        shaderPath.c_str(),
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        entryPoint,
+        target,
+        D3DCOMPILE_ENABLE_STRICTNESS,
+        0,
+        &shader,
+        &errors);
+    if (FAILED(hr))
+    {
+        if (errors != nullptr)
+        {
+            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
+        }
+        ThrowIfFailed(hr);
+    }
+    return shader;
+}
+
 void SandForge::LoadAssets()
 {
     LoadCubeMesh();
 
-    ComPtr<ID3DBlob> vertexShader;
-    ComPtr<ID3DBlob> pixelShader;
+    ComPtr<ID3DBlob> vertexShader = CompileShader(L"shaders\\cube_vs.hlsl", "VSMain", "vs_5_0");
+    ComPtr<ID3DBlob> pixelShader = CompileShader(L"shaders\\cube_ps.hlsl", "PSMain", "ps_5_0");
     ComPtr<ID3DBlob> errors;
-
-    const std::wstring vertexShaderPath = GetAssetFullPath(L"shaders\\cube_vs.hlsl");
-    HRESULT hr = D3DCompileFromFile(
-        vertexShaderPath.c_str(),
-        nullptr,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE,
-        "VSMain",
-        "vs_5_0",
-        D3DCOMPILE_ENABLE_STRICTNESS,
-        0,
-        &vertexShader,
-        &errors);
-    if (FAILED(hr))
-    {
-        if (errors != nullptr)
-        {
-            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
-        }
-        ThrowIfFailed(hr);
-    }
-    errors.Reset();
-    const std::wstring pixelShaderPath = GetAssetFullPath(L"shaders\\cube_ps.hlsl");
-    hr = D3DCompileFromFile(
-        pixelShaderPath.c_str(),
-        nullptr,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE,
-        "PSMain",
-        "ps_5_0",
-        D3DCOMPILE_ENABLE_STRICTNESS,
-        0,
-        &pixelShader,
-        &errors);
-    if (FAILED(hr))
-    {
-        if (errors != nullptr)
-        {
-            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
-        }
-        ThrowIfFailed(hr);
-    }
 
     D3D12_ROOT_PARAMETER rootParameter = {};
     rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -224,15 +302,16 @@ void SandForge::LoadAssets()
           D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
 
+    // PSO
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc = {};
     pipelineDesc.InputLayout = { inputLayout, _countof(inputLayout) };
     pipelineDesc.pRootSignature = m_rootSignature.Get();
-    pipelineDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
+    pipelineDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() }; // shader in bytes
     pipelineDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
     pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // no back culling
     pipelineDesc.RasterizerState.DepthClipEnable = TRUE;
-    pipelineDesc.BlendState.AlphaToCoverageEnable = FALSE;
+    pipelineDesc.BlendState.AlphaToCoverageEnable = FALSE; // no blending
     pipelineDesc.BlendState.IndependentBlendEnable = FALSE;
     const D3D12_RENDER_TARGET_BLEND_DESC defaultBlend =
     {
@@ -246,22 +325,22 @@ void SandForge::LoadAssets()
     {
         renderTarget = defaultBlend;
     }
-    pipelineDesc.DepthStencilState.DepthEnable = TRUE;
+    pipelineDesc.DepthStencilState.DepthEnable = TRUE; // enable depth test
     pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
     pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     pipelineDesc.DepthStencilState.StencilEnable = FALSE;
     pipelineDesc.SampleMask = UINT_MAX;
-    pipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; // draw triangle
     pipelineDesc.NumRenderTargets = 1;
-    pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // Keep the same format as swapchain
     pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pipelineDesc.SampleDesc.Count = 1;
-    ThrowIfFailed(m_device->CreateGraphicsPipelineState(
+    ThrowIfFailed(m_device->CreateGraphicsPipelineState( // create PSO
         &pipelineDesc,
         IID_PPV_ARGS(&m_pipelineState)));
 
     D3D12_HEAP_PROPERTIES uploadHeap = {};
-    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD; // CPU write; GPU read
     D3D12_RESOURCE_DESC bufferDesc = {};
     bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     bufferDesc.Height = 1;
@@ -270,7 +349,7 @@ void SandForge::LoadAssets()
     bufferDesc.SampleDesc.Count = 1;
     bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     bufferDesc.Width = m_cubeVertices.size() * sizeof(Vertex);
-    ThrowIfFailed(m_device->CreateCommittedResource(
+    ThrowIfFailed(m_device->CreateCommittedResource( // create buffer
         &uploadHeap,
         D3D12_HEAP_FLAG_NONE,
         &bufferDesc,
@@ -279,8 +358,8 @@ void SandForge::LoadAssets()
         IID_PPV_ARGS(&m_vertexBuffer)));
 
     void* mappedData = nullptr;
-    D3D12_RANGE readRange = { 0, 0 };
-    ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, &mappedData));
+    D3D12_RANGE readRange = { 0, 0 }; // Indicates CPU does not read the memory
+    ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, &mappedData)); // Get CPU pointer
     memcpy(mappedData, m_cubeVertices.data(), m_cubeVertices.size() * sizeof(Vertex));
     m_vertexBuffer->Unmap(0, nullptr);
     m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
@@ -392,6 +471,12 @@ void SandForge::LoadCubeMesh()
     }
 }
 
+void SandForge::UpdateGrid()
+{
+    // CPU copy -> mapped UPLOAD memory. The GPU copies it into m_gridBuffer in RecordGrid2D.
+    memcpy(m_mappedGridUpload, m_cells.data(), m_cells.size() * sizeof(UINT32));
+}
+
 void SandForge::UpdateCameraConstants()
 {
     const DirectX::XMVECTOR position = DirectX::XMLoadFloat3(&m_cameraPosition);
@@ -419,7 +504,7 @@ void SandForge::UpdateCameraConstants()
 void SandForge::CreateDepthBuffer(UINT width, UINT height)
 {
     D3D12_HEAP_PROPERTIES heapProperties = {};
-    heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT; // default heap: specific for GPU
 
     D3D12_RESOURCE_DESC depthDesc = {};
     depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -449,6 +534,66 @@ void SandForge::CreateDepthBuffer(UINT width, UINT height)
         m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
 }
 
+void SandForge::CreateGridResources()
+{
+    const UINT64 gridBytes = UINT64(GridWidth) * GridHeight * sizeof(UINT32);
+    m_cells.assign(GridWidth * GridHeight, MaterialEmpty);
+
+    D3D12_RESOURCE_DESC bufferDesc = {};
+    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDesc.Width = gridBytes;
+    bufferDesc.Height = 1;
+    bufferDesc.DepthOrArraySize = 1;
+    bufferDesc.MipLevels = 1;
+    bufferDesc.SampleDesc.Count = 1;
+    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES defaultHeap = {};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    ThrowIfFailed(m_device->CreateCommittedResource(
+        &defaultHeap, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&m_gridBuffer)));
+    
+    D3D12_HEAP_PROPERTIES uploadHeap = {};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    ThrowIfFailed(m_device->CreateCommittedResource(
+        &uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_gridUploadBuffer)
+    ));
+    D3D12_RANGE readRange = {0, 0}; // no read
+    ThrowIfFailed(m_gridUploadBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_mappedGridUpload)));
+
+    // Heaps visible for shader
+    D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+    srvHeapDesc.NumDescriptors = 1;
+    srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ThrowIfFailed(m_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_srvHeap)));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format =DXGI_FORMAT_UNKNOWN;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Buffer.NumElements = GridWidth * GridHeight;
+    srvDesc.Buffer.StructureByteStride = sizeof(UINT32); // must match StructuredBuffer<uint> in HLSL
+    m_device->CreateShaderResourceView(
+        m_gridBuffer.Get(), &srvDesc, m_srvHeap->GetCPUDescriptorHandleForHeapStart()
+    );
+
+    // Test pattern: a wall border around an 8x8 sand/empty checkerboard.
+    // Cells store material IDs only; the pixel shader maps them to colors.
+    constexpr UINT checkerSize = 8;
+    for (UINT y = 0; y < GridHeight; ++y)
+    {
+        for (UINT x = 0; x < GridWidth; ++x)
+        {
+            const bool isBorder = x == 0 || y == 0 || x == GridWidth - 1 || y == GridHeight - 1;
+            const bool isChecker = ((x / checkerSize) + (y / checkerSize)) % 2 == 0;
+            m_cells[y * GridWidth + x] = isBorder ? MaterialWall
+                : isChecker ? MaterialSand
+                : MaterialEmpty;
+        }
+    }
+}
+
 void SandForge::OnUpdate()
 {
     const auto now = std::chrono::steady_clock::now();
@@ -459,6 +604,12 @@ void SandForge::OnUpdate()
 
     if (deltaTime <= 0.0f || m_isMinimized)
     {
+        return;
+    }
+
+    if (m_viewMode == ViewMode::View2D)
+    {
+        UpdateGrid();
         return;
     }
 
@@ -496,7 +647,6 @@ void SandForge::OnUpdate()
     {
         moveY -= 1.0f;
     }
-
     const float moveLength = sqrtf(moveX * moveX + moveY * moveY + moveZ * moveZ);
     if (moveLength > 0.0f)
     {
@@ -513,6 +663,15 @@ void SandForge::OnUpdate()
 void SandForge::OnKeyDown(UINT8 key)
 {
     m_keys[key] = true;
+
+    if (key == '2' || key == VK_NUMPAD2)
+    {
+        m_viewMode = ViewMode::View2D;
+    }
+    else if (key == '3' || key == VK_NUMPAD3)
+    {
+        m_viewMode = ViewMode::View3D;
+    }
 }
 
 void SandForge::OnKeyUp(UINT8 key)
@@ -567,6 +726,7 @@ void SandForge::OnRender()
     WaitForPreviousFrame();
 }
 
+// Per-frame skeleton shared by both views: reset -> back buffer to RENDER_TARGET -> draw -> back to PRESENT -> close.
 void SandForge::PopulateCommandList()
 {
     ThrowIfFailed(m_commandAllocator->Reset());
@@ -591,6 +751,24 @@ void SandForge::PopulateCommandList()
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     m_commandList->ResourceBarrier(1, &barrier);
 
+    if (m_viewMode == ViewMode::View2D)
+    {
+        RecordGrid2D();
+    }
+    else
+    {
+        RecordCube3D();
+    }
+
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    m_commandList->ResourceBarrier(1, &barrier);
+    ThrowIfFailed(m_commandList->Close());
+}
+
+void SandForge::RecordCube3D()
+{
+    // Get the current handle by frame index
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtvHandle.ptr += static_cast<SIZE_T>(m_frameIndex) * m_rtvDescriptorSize;
     const D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -601,7 +779,7 @@ void SandForge::PopulateCommandList()
     m_commandList->ClearDepthStencilView(
         dsvHandle,
         D3D12_CLEAR_FLAG_DEPTH,
-        1.0f,
+        1.0f, // farthest depth
         0,
         0,
         nullptr);
@@ -611,6 +789,7 @@ void SandForge::PopulateCommandList()
         0,
         m_cameraBuffer->GetGPUVirtualAddress());
     m_commandList->SetPipelineState(m_pipelineState.Get());
+    // Tell Input Assembler (IA) how to read data
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
     m_commandList->IASetIndexBuffer(&m_indexBufferView);
@@ -620,11 +799,47 @@ void SandForge::PopulateCommandList()
         0,
         0,
         0);
+}
 
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+void SandForge::RecordGrid2D()
+{
+    // 1. Copy UPLOAD -> DEFAULT. Buffers decay to COMMON after every ExecuteCommandLists.
+    const UINT64 gridBytes = UINT64(GridWidth) * GridHeight * sizeof(UINT32);
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = m_gridBuffer.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     m_commandList->ResourceBarrier(1, &barrier);
-    ThrowIfFailed(m_commandList->Close());
+
+    m_commandList->CopyBufferRegion(m_gridBuffer.Get(), 0, m_gridUploadBuffer.Get(), 0, gridBytes);
+
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    m_commandList->ResourceBarrier(1, &barrier);
+
+    // 2. Bind the back buffer only: the 2D PSO has no depth buffer.
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtvHandle.ptr += static_cast<SIZE_T>(m_frameIndex) * m_rtvDescriptorSize;
+    m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+    const float letterboxColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    m_commandList->ClearRenderTargetView(rtvHandle, letterboxColor, 0, nullptr);
+
+    // 3. Bind root parameters and draw the fullscreen triangle.
+    const GridConstants constants = {
+        GridWidth, GridHeight, float(m_width), float(m_height)
+    };
+
+    m_commandList->SetGraphicsRootSignature(m_gridRootSignature.Get());
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
+    m_commandList->SetDescriptorHeaps(_countof(heaps), heaps);
+    m_commandList->SetGraphicsRoot32BitConstants(0, sizeof(constants) / 4, &constants, 0);
+    m_commandList->SetGraphicsRootDescriptorTable(1, m_srvHeap->GetGPUDescriptorHandleForHeapStart()); // one SRV table starting from t0
+    m_commandList->SetPipelineState(m_gridPipelineState.Get());
+    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_commandList->DrawInstanced(3, 1, 0, 0);
 }
 
 void SandForge::WaitForPreviousFrame()
@@ -715,5 +930,9 @@ void SandForge::OnDestroy()
     {
         m_cameraBuffer->Unmap(0, nullptr);
         m_mappedCameraConstants = nullptr;
+    }
+    if (m_gridUploadBuffer != nullptr && m_mappedGridUpload != nullptr) {
+        m_gridUploadBuffer->Unmap(0, nullptr);
+        m_mappedGridUpload = nullptr;
     }
 }

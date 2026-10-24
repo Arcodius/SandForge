@@ -36,6 +36,17 @@ private:
         float padding[48];
     };
 
+    enum class ViewMode { View2D, View3D };
+    static constexpr UINT GridWidth = 320;
+    static constexpr UINT GridHeight = 180;
+
+    struct GridConstants {
+        UINT gridWidth;
+        UINT gridHeight;
+        float viewportWidth;
+        float viewportHeight;
+    };
+
     D3D12_RECT m_scissorRect;
     ComPtr<IDXGISwapChain3> m_swapChain;
     ComPtr<ID3D12Device> m_device;
@@ -48,7 +59,7 @@ private:
     ComPtr<ID3D12GraphicsCommandList> m_commandList;
     ComPtr<ID3D12RootSignature> m_rootSignature;
     ComPtr<ID3D12PipelineState> m_pipelineState;
-    ComPtr<ID3D12Resource> m_vertexBuffer;
+    ComPtr<ID3D12Resource> m_vertexBuffer; // D3D12Resource is only a COM object / handler, not memory itself
     ComPtr<ID3D12Resource> m_indexBuffer;
     ComPtr<ID3D12Resource> m_cameraBuffer;
     CameraConstants* m_mappedCameraConstants;
@@ -72,12 +83,28 @@ private:
     std::vector<Vertex> m_cubeVertices;
     std::vector<UINT32> m_cubeIndices;
 
+    ViewMode m_viewMode;
+    ComPtr<ID3D12RootSignature> m_gridRootSignature;
+    ComPtr<ID3D12PipelineState> m_gridPipelineState;
+    ComPtr<ID3D12DescriptorHeap> m_srvHeap;
+    ComPtr<ID3D12Resource> m_gridBuffer;        // DEFAULT heap
+    ComPtr<ID3D12Resource> m_gridUploadBuffer;  // UPLOAD heap
+    UINT32* m_mappedGridUpload;
+    std::vector<UINT32> m_cells;
+
     void LoadPipeline();
     void LoadAssets();
     void LoadCubeMesh();
     void UpdateCameraConstants();
+    ComPtr<ID3DBlob> CompileShader(LPCWSTR assetName, LPCSTR entryPoint, LPCSTR target);
     void CreateDepthBuffer(UINT width, UINT height);
     void PopulateCommandList();
     void WaitForPreviousFrame();
     void Resize(UINT width, UINT height);
+
+    void CreateGridResources();
+    void LoadGridPipeline();
+    void RecordGrid2D();
+    void RecordCube3D();
+    void UpdateGrid();
 };
