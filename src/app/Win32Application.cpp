@@ -126,30 +126,47 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
             pSample->OnMouseMove(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         }
         return 0;
+    case WM_LBUTTONDOWN:
+        SetCapture(hWnd);
+        if (pSample) {
+            pSample->OnMouseButton(MouseButton::Left, true, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        // wParam holds the buttons still down: keep capture while the other button is held
+        if (GetCapture() == hWnd && !(wParam & MK_RBUTTON)) {
+            ReleaseCapture();
+        }
+        if (pSample) {
+            pSample->OnMouseButton(MouseButton::Left, false, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        }
+        return 0;
 
     case WM_RBUTTONDOWN:
         SetCapture(hWnd);
         if (pSample)
         {
-            pSample->OnMouseButton(true, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            pSample->OnMouseButton(MouseButton::Right, true, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         }
         return 0;
 
     case WM_RBUTTONUP:
-        if (GetCapture() == hWnd)
+        if (GetCapture() == hWnd && !(wParam & MK_LBUTTON))
         {
             ReleaseCapture();
         }
         if (pSample)
         {
-            pSample->OnMouseButton(false, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            pSample->OnMouseButton(MouseButton::Right, false, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         }
         return 0;
 
     case WM_CAPTURECHANGED:
+        // Capture lost (alt-tab, another window...): no BUTTONUP will arrive, so release both buttons here
         if (pSample)
         {
-            pSample->OnMouseButton(false, 0, 0);
+            pSample->OnMouseButton(MouseButton::Left, false, 0, 0);
+            pSample->OnMouseButton(MouseButton::Right, false, 0, 0);
         }
         return 0;
 
@@ -167,7 +184,8 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
         }
         if (pSample)
         {
-            pSample->OnMouseButton(false, 0, 0);
+            pSample->OnMouseButton(MouseButton::Left, false, 0, 0);
+            pSample->OnMouseButton(MouseButton::Right, false, 0, 0);
             for (UINT8 key = 0; key < 255; ++key)
             {
                 pSample->OnKeyUp(key);

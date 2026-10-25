@@ -38,6 +38,16 @@ float4 PSMain(float4 position : SV_POSITION) : SV_TARGET
         return LetterboxColor;
     }
 
-    const uint2 cell = uint2(gridPos);
-    return float4(MaterialColor(cells[cell.y * gridWidth + cell.x]), 1.0f);
+    const uint2 cellPos = uint2(gridPos);
+    // Cell layout (see sim/Material.h): bits 0-7 material, bits 8-15 per-grain shade
+    const uint cell = cells[cellPos.y * gridWidth + cellPos.x];
+    const uint material = cell & 0xFF;
+    const float shade = ((cell >> 8) & 0xFF) / 255.0f;
+
+    float3 color = MaterialColor(material);
+    if (material != 0)
+    {
+        color *= lerp(0.85f, 1.15f, shade);
+    }
+    return float4(color, 1.0f);
 }

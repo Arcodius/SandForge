@@ -4,8 +4,11 @@
 #include <chrono>
 #include <vector>
 
+#include "sim/SandWorld.h"
+
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
+
 
 class SandForge : public DXSample {
 public:
@@ -19,7 +22,7 @@ public:
     void OnKeyDown(UINT8 key) override;
     void OnKeyUp(UINT8 key) override;
     void OnMouseMove(int x, int y) override;
-    void OnMouseButton(bool pressed, int x, int y) override;
+    void OnMouseButton(MouseButton button, bool pressed, int x, int y) override;
     void OnMouseWheel(short delta) override;
 
 private:
@@ -39,6 +42,21 @@ private:
     enum class ViewMode { View2D, View3D };
     static constexpr UINT GridWidth = 320;
     static constexpr UINT GridHeight = 180;
+
+    static constexpr float TickSeconds = 1.0f / 60.0f;
+    static constexpr int MaxStepsPerFrame = 4;
+    float m_accumulator = 0.0f;
+    bool m_paused = false;
+
+    // 2D brush. Positions are in grid space (fractional cells), not pixels.
+    static constexpr int MaxBrushRadius = 32;
+    bool m_stroking = false;
+    MouseButton m_strokeButton = MouseButton::Left;
+    Material m_strokeMaterial = MaterialSand;  // what the active stroke writes (eraser = MaterialEmpty)
+    Material m_brushMaterial = MaterialSand;   // left-button material, picked with Z/X
+    int m_brushRadius = 3;
+    float m_lastBrushX = 0.0f;
+    float m_lastBrushY = 0.0f;
 
     struct GridConstants {
         UINT gridWidth;
@@ -90,7 +108,7 @@ private:
     ComPtr<ID3D12Resource> m_gridBuffer;        // DEFAULT heap
     ComPtr<ID3D12Resource> m_gridUploadBuffer;  // UPLOAD heap
     UINT32* m_mappedGridUpload;
-    std::vector<UINT32> m_cells;
+    SandWorld m_world;
 
     void LoadPipeline();
     void LoadAssets();
@@ -107,4 +125,8 @@ private:
     void RecordGrid2D();
     void RecordCube3D();
     void UpdateGrid();
+
+    void ScreenToGrid(int screenX, int screenY, float& gridX, float& gridY) const;
+    void StampBrushLine(float fromX, float fromY, float toX, float toY);
+    void UpdateWindowTitle();
 };

@@ -1,8 +1,6 @@
 #include "stdafx.h"
 #include "SandForge.h"
 
-#include "sim/Material.h"
-
 SandForge::SandForge(UINT width, UINT height, std::wstring name) :
     DXSample(width, height, name),
     m_scissorRect{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) },
@@ -22,7 +20,8 @@ SandForge::SandForge(UINT width, UINT height, std::wstring name) :
     m_fieldOfView(DirectX::XM_PIDIV4),
     m_previousUpdate(std::chrono::steady_clock::now()),
     m_viewMode(ViewMode::View2D),
-    m_mappedGridUpload(nullptr)
+    m_mappedGridUpload(nullptr),
+    m_world(GridWidth, GridHeight)
 {
 }
 
@@ -32,6 +31,7 @@ void SandForge::OnInit()
     LoadAssets();
     CreateGridResources();
     LoadGridPipeline();
+    UpdateWindowTitle();
 }
 
 void SandForge::LoadPipeline()
@@ -474,7 +474,7 @@ void SandForge::LoadCubeMesh()
 void SandForge::UpdateGrid()
 {
     // CPU copy -> mapped UPLOAD memory. The GPU copies it into m_gridBuffer in RecordGrid2D.
-    memcpy(m_mappedGridUpload, m_cells.data(), m_cells.size() * sizeof(UINT32));
+    memcpy(m_mappedGridUpload, m_world.Data(), m_world.ByteSize());
 }
 
 void SandForge::UpdateCameraConstants()
@@ -537,7 +537,6 @@ void SandForge::CreateDepthBuffer(UINT width, UINT height)
 void SandForge::CreateGridResources()
 {
     const UINT64 gridBytes = UINT64(GridWidth) * GridHeight * sizeof(UINT32);
-    m_cells.assign(GridWidth * GridHeight, MaterialEmpty);
 
     D3D12_RESOURCE_DESC bufferDesc = {};
     bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -579,19 +578,7 @@ void SandForge::CreateGridResources()
     );
 
     // Test pattern: a wall border around an 8x8 sand/empty checkerboard.
-    // Cells store material IDs only; the pixel shader maps them to colors.
-    constexpr UINT checkerSize = 8;
-    for (UINT y = 0; y < GridHeight; ++y)
-    {
-        for (UINT x = 0; x < GridWidth; ++x)
-        {
-            const bool isBorder = x == 0 || y == 0 || x == GridWidth - 1 || y == GridHeight - 1;
-            const bool isChecker = ((x / checkerSize) + (y / checkerSize)) % 2 == 0;
-            m_cells[y * GridWidth + x] = isBorder ? MaterialWall
-                : isChecker ? MaterialSand
-                : MaterialEmpty;
-        }
-    }
+    m_world.FillTestPattern();
 }
 
 void SandForge::OnUpdate()
@@ -601,6 +588,13 @@ void SandForge::OnUpdate()
         std::chrono::duration<float>(now - m_previousUpdate).count(),
         0.1f);
     m_previousUpdate = now;
+    m_accumulator += deltaTime;
+    int steps = 0;
+    while (m_accumulator >= TickSeconds && steps < MaxStepsPerFrame) {
+        m_accumulator -= TickSeconds;
+        ++steps;
+    }
+    if (steps == MaxStepsPerFrame) m_accumulator = 0.0f;
 
     if (deltaTime <= 0.0f || m_isMinimized)
     {
@@ -609,6 +603,15 @@ void SandForge::OnUpdate()
 
     if (m_viewMode == ViewMode::View2D)
     {
+        if (!m_paused) {
+            for (int i = 0; i < steps; ++i) {
+                // A held brush keeps pouring: refill its disc once per tick, before the sand falls away
+                if (m_stroking) {
+                    m_world.Paint(int(floorf(m_lastBrushX)), int(floorf(m_lastBrushY)), m_brushRadius, m_strokeMaterial);
+                }
+                m_world.Step();
+            }
+        }
         UpdateGrid();
         return;
     }
@@ -662,7 +665,14 @@ void SandForge::OnUpdate()
 
 void SandForge::OnKeyDown(UINT8 key)
 {
+    const bool firstPress = !m_keys[key];
     m_keys[key] = true;
+
+    if (key == 'P' && firstPress) m_paused = !m_paused;
+    if (key == 'N' && m_paused) m_world.Step();
+    if (key == 'Z') m_brushMaterial = MaterialSand;
+    if (key == 'X') m_brushMaterial = MaterialWall;
+    if (key == 'C' && firstPress) m_world.Clear();
 
     if (key == '2' || key == VK_NUMPAD2)
     {
@@ -671,6 +681,12 @@ void SandForge::OnKeyDown(UINT8 key)
     else if (key == '3' || key == VK_NUMPAD3)
     {
         m_viewMode = ViewMode::View3D;
+        m_stroking = false; // the brush only lives in 2D
+    }
+
+    if (firstPress)
+    {
+        UpdateWindowTitle();
     }
 }
 
@@ -691,17 +707,99 @@ void SandForge::OnMouseMove(int x, int y)
     }
     m_lastMouseX = x;
     m_lastMouseY = y;
+
+    if (m_stroking)
+    {
+        float gridX, gridY;
+        ScreenToGrid(x, y, gridX, gridY);
+        StampBrushLine(m_lastBrushX, m_lastBrushY, gridX, gridY);
+        m_lastBrushX = gridX;
+        m_lastBrushY = gridY;
+    }
 }
 
-void SandForge::OnMouseButton(bool pressed, int x, int y)
+void SandForge::OnMouseButton(MouseButton button, bool pressed, int x, int y)
 {
-    m_looking = pressed;
+    // Releases always go through, whatever the mode: the press may have happened before a 2/3 switch
+    if (!pressed)
+    {
+        if (button == MouseButton::Right)
+        {
+            m_looking = false;
+        }
+        if (m_stroking && button == m_strokeButton)
+        {
+            m_stroking = false;
+        }
+        return;
+    }
+
     m_lastMouseX = x;
     m_lastMouseY = y;
+    if (m_viewMode == ViewMode::View3D)
+    {
+        m_looking = button == MouseButton::Right;
+        return;
+    }
+
+    if (button != MouseButton::Left && button != MouseButton::Right)
+    {
+        return;
+    }
+    // Left paints the selected material, right erases
+    m_strokeMaterial = button == MouseButton::Left ? m_brushMaterial : MaterialEmpty;
+    m_strokeButton = button;
+    m_stroking = true;
+    ScreenToGrid(x, y, m_lastBrushX, m_lastBrushY);
+    m_world.Paint(int(floorf(m_lastBrushX)), int(floorf(m_lastBrushY)), m_brushRadius, m_strokeMaterial);
+}
+
+// Inverse of the cell lookup in grid_ps.hlsl: keep the scale/offset math identical
+void SandForge::ScreenToGrid(int screenX, int screenY, float& gridX, float& gridY) const
+{
+    const float scale = (std::min)(float(m_width) / GridWidth, float(m_height) / GridHeight);
+    const float offsetX = (float(m_width) - GridWidth * scale) * 0.5f;
+    const float offsetY = (float(m_height) - GridHeight * scale) * 0.5f;
+    // +0.5: SV_POSITION in the shader is the pixel center, the mouse gives the pixel's corner
+    gridX = (screenX + 0.5f - offsetX) / scale;
+    gridY = (screenY + 0.5f - offsetY) / scale;
+}
+
+// Stamps along the segment so fast strokes stay connected. The start point was stamped by the previous call.
+void SandForge::StampBrushLine(float fromX, float fromY, float toX, float toY)
+{
+    const float dx = toX - fromX;
+    const float dy = toY - fromY;
+    const float length = sqrtf(dx * dx + dy * dy);
+    // Stamps half a radius apart overlap enough to leave no gaps; at radius 0 every cell counts
+    const float spacing = (std::max)(0.5f * m_brushRadius, 0.5f);
+    const int stamps = (std::max)(1, int(ceilf(length / spacing)));
+    for (int i = 1; i <= stamps; ++i)
+    {
+        const float t = float(i) / stamps;
+        // floor, not int(): int() truncates toward zero, so -0.7 (outside the grid) would land in cell 0
+        m_world.Paint(int(floorf(fromX + dx * t)), int(floorf(fromY + dy * t)), m_brushRadius, m_strokeMaterial);
+    }
+}
+
+void SandForge::UpdateWindowTitle()
+{
+    const wchar_t* material = m_brushMaterial == MaterialWall ? L"Wall" : L"Sand";
+    const std::wstring text = std::wstring(L"[Z/X] ") + material
+        + L"  [Wheel] radius " + std::to_wstring(m_brushRadius)
+        + (m_paused ? L"  PAUSED (N: step)" : L"");
+    SetCustomWindowText(text.c_str());
 }
 
 void SandForge::OnMouseWheel(short delta)
 {
+    if (m_viewMode == ViewMode::View2D)
+    {
+        m_brushRadius = (std::clamp)(m_brushRadius + delta / WHEEL_DELTA, 0, MaxBrushRadius);
+        UpdateWindowTitle();
+        return;
+    }
+
     constexpr float radiansPerNotch = DirectX::XM_PI / 36.0f;
     m_fieldOfView -= static_cast<float>(delta) / WHEEL_DELTA * radiansPerNotch;
     m_fieldOfView = (std::clamp)(
