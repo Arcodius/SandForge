@@ -3,6 +3,8 @@
 
 #include "render/D3DUtil.h"
 
+#include <random>
+
 SandForge::SandForge(UINT width, UINT height, std::wstring name) :
     DXSample(width, height, name),
     m_scissorRect{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) },
@@ -28,6 +30,9 @@ void SandForge::OnInit()
 {
     LoadPipeline();
     LoadAssets();
+    LoadParticles();
+    m_particleRenderer.Init(m_device.Get(), static_cast<UINT>(m_particles.size()));
+    m_particleRenderer.Upload(m_particles.data(), static_cast<UINT>(m_particles.size()));
 }
 
 void SandForge::LoadPipeline()
@@ -310,6 +315,33 @@ void SandForge::LoadCubeMesh()
     }
 }
 
+void SandForge::LoadParticles() {
+    constexpr size_t w = 32;
+    constexpr float spacing = 0.4f / w;
+    constexpr size_t pNum = w*w*w;
+
+    // Mersenne Twister, fixed seed: every run starts from the same state, so bugs reproduce
+    std::mt19937 gen(12345);
+    // +-25% of the spacing: breaks the regular lattice without letting neighbours overlap
+    std::uniform_real_distribution<float> dist_coord(-0.25f * spacing, 0.25f * spacing);
+    std::uniform_real_distribution<float> dist_shade(0.75f, 1.25f);
+
+    m_particles.reserve(pNum);
+    for (size_t z = 0; z < w; ++z) {
+        float posZ = 0.3f + (z+0.5f) * spacing;
+        for (size_t y = 0; y < w; ++y) {
+            float posY = 0.5f + (y+0.5f) * spacing;
+            for (size_t x = 0; x < w; ++x) {
+                float posX = 0.3f + (x+0.5f) * spacing;
+                m_particles.push_back(Particle{
+                    DirectX::XMFLOAT3(posX+dist_coord(gen), posY+dist_coord(gen), posZ+dist_coord(gen)),
+                    dist_shade(gen)
+                });
+            }
+        }
+    }
+}
+
 void SandForge::UpdateCameraConstants()
 {
     const DirectX::XMVECTOR position = DirectX::XMLoadFloat3(&m_cameraPosition);
@@ -396,6 +428,7 @@ void SandForge::OnUpdate()
             // Simulation tick goes here (M1 task 5: placeholder particle physics)
         }
     }
+    m_particleRenderer.Upload(m_particles.data(), static_cast<UINT>(m_particles.size()));
 
     const float forwardX = sinf(m_cameraYaw);
     const float forwardZ = cosf(m_cameraYaw);

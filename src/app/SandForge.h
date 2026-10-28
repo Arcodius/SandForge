@@ -4,6 +4,9 @@
 #include <chrono>
 #include <vector>
 
+#include "render/ParticleRenderer.h"
+#include "sim/Particle.h"
+
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 
@@ -76,10 +79,13 @@ private:
     std::chrono::steady_clock::time_point m_previousUpdate;
     std::vector<Vertex> m_cubeVertices;
     std::vector<UINT32> m_cubeIndices;
+    std::vector<Particle> m_particles; // CPU copy; the simulation will own this from M3 on
+    ParticleRenderer m_particleRenderer;
 
     void LoadPipeline();
     void LoadAssets();
     void LoadCubeMesh();
+    void LoadParticles();
     void UpdateCameraConstants();
     void CreateDepthBuffer(UINT width, UINT height);
     void PopulateCommandList();
