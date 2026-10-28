@@ -4,11 +4,8 @@
 #include <chrono>
 #include <vector>
 
-#include "sim/SandWorld.h"
-
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
-
 
 class SandForge : public DXSample {
 public:
@@ -39,31 +36,10 @@ private:
         float padding[48];
     };
 
-    enum class ViewMode { View2D, View3D };
-    static constexpr UINT GridWidth = 320;
-    static constexpr UINT GridHeight = 180;
-
     static constexpr float TickSeconds = 1.0f / 60.0f;
     static constexpr int MaxStepsPerFrame = 4;
     float m_accumulator = 0.0f;
     bool m_paused = false;
-
-    // 2D brush. Positions are in grid space (fractional cells), not pixels.
-    static constexpr int MaxBrushRadius = 32;
-    bool m_stroking = false;
-    MouseButton m_strokeButton = MouseButton::Left;
-    Material m_strokeMaterial = MaterialSand;  // what the active stroke writes (eraser = MaterialEmpty)
-    Material m_brushMaterial = MaterialSand;   // left-button material, picked with Z/X
-    int m_brushRadius = 3;
-    float m_lastBrushX = 0.0f;
-    float m_lastBrushY = 0.0f;
-
-    struct GridConstants {
-        UINT gridWidth;
-        UINT gridHeight;
-        float viewportWidth;
-        float viewportHeight;
-    };
 
     D3D12_RECT m_scissorRect;
     ComPtr<IDXGISwapChain3> m_swapChain;
@@ -101,32 +77,13 @@ private:
     std::vector<Vertex> m_cubeVertices;
     std::vector<UINT32> m_cubeIndices;
 
-    ViewMode m_viewMode;
-    ComPtr<ID3D12RootSignature> m_gridRootSignature;
-    ComPtr<ID3D12PipelineState> m_gridPipelineState;
-    ComPtr<ID3D12DescriptorHeap> m_srvHeap;
-    ComPtr<ID3D12Resource> m_gridBuffer;        // DEFAULT heap
-    ComPtr<ID3D12Resource> m_gridUploadBuffer;  // UPLOAD heap
-    UINT32* m_mappedGridUpload;
-    SandWorld m_world;
-
     void LoadPipeline();
     void LoadAssets();
     void LoadCubeMesh();
     void UpdateCameraConstants();
-    ComPtr<ID3DBlob> CompileShader(LPCWSTR assetName, LPCSTR entryPoint, LPCSTR target);
     void CreateDepthBuffer(UINT width, UINT height);
     void PopulateCommandList();
     void WaitForPreviousFrame();
     void Resize(UINT width, UINT height);
-
-    void CreateGridResources();
-    void LoadGridPipeline();
-    void RecordGrid2D();
-    void RecordCube3D();
-    void UpdateGrid();
-
-    void ScreenToGrid(int screenX, int screenY, float& gridX, float& gridY) const;
-    void StampBrushLine(float fromX, float fromY, float toX, float toY);
-    void UpdateWindowTitle();
+    void RecordScene();
 };

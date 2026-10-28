@@ -20,10 +20,7 @@ SandForge::SandForge(UINT width, UINT height, std::wstring name) :
     m_cameraYaw(0.0f),
     m_cameraPitch(0.0f),
     m_fieldOfView(DirectX::XM_PIDIV4),
-    m_previousUpdate(std::chrono::steady_clock::now()),
-    m_viewMode(ViewMode::View2D),
-    m_mappedGridUpload(nullptr),
-    m_world(GridWidth, GridHeight)
+    m_previousUpdate(std::chrono::steady_clock::now())
 {
 }
 
@@ -31,9 +28,6 @@ void SandForge::OnInit()
 {
     LoadPipeline();
     LoadAssets();
-    CreateGridResources();
-    LoadGridPipeline();
-    UpdateWindowTitle();
 }
 
 void SandForge::LoadPipeline()
@@ -152,84 +146,13 @@ void SandForge::LoadPipeline()
     m_scissorRect = { 0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height) };
 }
 
-void SandForge::LoadGridPipeline()
-{
-    ComPtr<ID3DBlob> vertexShader = D3DUtil::CompileShaderFile(L"shaders\\grid_vs.hlsl", "VSMain", "vs_5_0");
-    ComPtr<ID3DBlob> pixelShader = D3DUtil::CompileShaderFile(L"shaders\\grid_ps.hlsl", "PSMain", "ps_5_0");
-
-    D3D12_DESCRIPTOR_RANGE srvRange = {};
-    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors = 1;
-    srvRange.BaseShaderRegister = 0; // t0
-    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER params[2] = {};
-    // The first argument is four constants
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[0].Constants.ShaderRegister = 0; // b0
-    params[0].Constants.Num32BitValues = sizeof(GridConstants) / 4;
-    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    // The second argument is a pointer to descriptor table
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[1].DescriptorTable.NumDescriptorRanges = 1;
-    params[1].DescriptorTable.pDescriptorRanges = &srvRange;
-    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    // No vertex input: the fullscreen triangle is generated from SV_VertexID
-    D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
-    rootSignatureDesc.NumParameters = _countof(params);
-    rootSignatureDesc.pParameters = params;
-    rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
-
-    m_gridRootSignature = D3DUtil::CreateRootSignature(
-        m_device.Get(), rootSignatureDesc
-    );
-
-    // PSO
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc = {};
-    pipelineDesc.InputLayout = { nullptr, 0 };
-    pipelineDesc.pRootSignature = m_gridRootSignature.Get();
-    pipelineDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() }; // shader in bytes
-    pipelineDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
-    pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // no back culling
-    pipelineDesc.RasterizerState.DepthClipEnable = FALSE;
-    pipelineDesc.BlendState.AlphaToCoverageEnable = FALSE; // no blending
-    pipelineDesc.BlendState.IndependentBlendEnable = FALSE;
-    const D3D12_RENDER_TARGET_BLEND_DESC defaultBlend =
-    {
-        FALSE, FALSE,
-        D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
-        D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
-        D3D12_LOGIC_OP_NOOP,
-        D3D12_COLOR_WRITE_ENABLE_ALL
-    };
-    for (auto& renderTarget : pipelineDesc.BlendState.RenderTarget)
-    {
-        renderTarget = defaultBlend;
-    }
-    pipelineDesc.DepthStencilState.DepthEnable = FALSE; // disable depth test for 2D
-    pipelineDesc.DepthStencilState.StencilEnable = FALSE;
-    pipelineDesc.SampleMask = UINT_MAX;
-    pipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; // draw triangle
-    pipelineDesc.NumRenderTargets = 1;
-    pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // Keep the same format as swapchain
-    pipelineDesc.DSVFormat = DXGI_FORMAT_UNKNOWN; // No need to bind DSV when recording 2D
-    pipelineDesc.SampleDesc.Count = 1;
-    ThrowIfFailed(m_device->CreateGraphicsPipelineState( // create PSO
-        &pipelineDesc,
-        IID_PPV_ARGS(&m_gridPipelineState)));
-}
-
-
-
 void SandForge::LoadAssets()
 {
     LoadCubeMesh();
 
-    ComPtr<ID3DBlob> vertexShader = D3DUtil::CompileShaderFile(L"shaders\\cube_vs.hlsl", "VSMain", "vs_5_0");
-    ComPtr<ID3DBlob> pixelShader = D3DUtil::CompileShaderFile(L"shaders\\cube_ps.hlsl", "PSMain", "ps_5_0");
-    ComPtr<ID3DBlob> errors;
+    // Full paths: relative ones resolve against the working directory, which isn't the exe folder under the VS debugger
+    ComPtr<ID3DBlob> vertexShader = D3DUtil::CompileShaderFile(GetAssetFullPath(L"shaders\\cube_vs.hlsl"), "VSMain", "vs_5_0");
+    ComPtr<ID3DBlob> pixelShader = D3DUtil::CompileShaderFile(GetAssetFullPath(L"shaders\\cube_ps.hlsl"), "PSMain", "ps_5_0");
 
     D3D12_ROOT_PARAMETER rootParameter = {};
     rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -387,12 +310,6 @@ void SandForge::LoadCubeMesh()
     }
 }
 
-void SandForge::UpdateGrid()
-{
-    // CPU copy -> mapped UPLOAD memory. The GPU copies it into m_gridBuffer in RecordGrid2D.
-    memcpy(m_mappedGridUpload, m_world.Data(), m_world.ByteSize());
-}
-
 void SandForge::UpdateCameraConstants()
 {
     const DirectX::XMVECTOR position = DirectX::XMLoadFloat3(&m_cameraPosition);
@@ -452,38 +369,6 @@ void SandForge::CreateDepthBuffer(UINT width, UINT height)
         m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
 }
 
-void SandForge::CreateGridResources()
-{
-    m_gridBuffer = D3DUtil::CreateBuffer(
-        m_device.Get(), D3D12_HEAP_TYPE_DEFAULT, UINT64(GridWidth) * GridHeight * sizeof(UINT32), D3D12_RESOURCE_STATE_COMMON
-    );
-    m_gridUploadBuffer = D3DUtil::CreateBuffer(
-        m_device.Get(), D3D12_HEAP_TYPE_UPLOAD, UINT64(GridWidth) * GridHeight * sizeof(UINT32), D3D12_RESOURCE_STATE_GENERIC_READ
-    );
-    D3D12_RANGE readRange = {0, 0}; // no read
-    ThrowIfFailed(m_gridUploadBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_mappedGridUpload)));
-
-    // Heaps visible for shader
-    D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.NumDescriptors = 1;
-    srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    ThrowIfFailed(m_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_srvHeap)));
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format =DXGI_FORMAT_UNKNOWN;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Buffer.NumElements = GridWidth * GridHeight;
-    srvDesc.Buffer.StructureByteStride = sizeof(UINT32); // must match StructuredBuffer<uint> in HLSL
-    m_device->CreateShaderResourceView(
-        m_gridBuffer.Get(), &srvDesc, m_srvHeap->GetCPUDescriptorHandleForHeapStart()
-    );
-
-    // Test pattern: a wall border around an 8x8 sand/empty checkerboard.
-    m_world.FillTestPattern();
-}
-
 void SandForge::OnUpdate()
 {
     const auto now = std::chrono::steady_clock::now();
@@ -504,19 +389,12 @@ void SandForge::OnUpdate()
         return;
     }
 
-    if (m_viewMode == ViewMode::View2D)
+    if (!m_paused)
     {
-        if (!m_paused) {
-            for (int i = 0; i < steps; ++i) {
-                // A held brush keeps pouring: refill its disc once per tick, before the sand falls away
-                if (m_stroking) {
-                    m_world.Paint(int(floorf(m_lastBrushX)), int(floorf(m_lastBrushY)), m_brushRadius, m_strokeMaterial);
-                }
-                m_world.Step();
-            }
+        for (int i = 0; i < steps; ++i)
+        {
+            // Simulation tick goes here (M1 task 5: placeholder particle physics)
         }
-        UpdateGrid();
-        return;
     }
 
     const float forwardX = sinf(m_cameraYaw);
@@ -572,25 +450,6 @@ void SandForge::OnKeyDown(UINT8 key)
     m_keys[key] = true;
 
     if (key == 'P' && firstPress) m_paused = !m_paused;
-    if (key == 'N' && m_paused) m_world.Step();
-    if (key == 'Z') m_brushMaterial = MaterialSand;
-    if (key == 'X') m_brushMaterial = MaterialWall;
-    if (key == 'C' && firstPress) m_world.Clear();
-
-    if (key == '2' || key == VK_NUMPAD2)
-    {
-        m_viewMode = ViewMode::View2D;
-    }
-    else if (key == '3' || key == VK_NUMPAD3)
-    {
-        m_viewMode = ViewMode::View3D;
-        m_stroking = false; // the brush only lives in 2D
-    }
-
-    if (firstPress)
-    {
-        UpdateWindowTitle();
-    }
 }
 
 void SandForge::OnKeyUp(UINT8 key)
@@ -610,99 +469,20 @@ void SandForge::OnMouseMove(int x, int y)
     }
     m_lastMouseX = x;
     m_lastMouseY = y;
-
-    if (m_stroking)
-    {
-        float gridX, gridY;
-        ScreenToGrid(x, y, gridX, gridY);
-        StampBrushLine(m_lastBrushX, m_lastBrushY, gridX, gridY);
-        m_lastBrushX = gridX;
-        m_lastBrushY = gridY;
-    }
 }
 
 void SandForge::OnMouseButton(MouseButton button, bool pressed, int x, int y)
 {
-    // Releases always go through, whatever the mode: the press may have happened before a 2/3 switch
-    if (!pressed)
+    if (button == MouseButton::Right)
     {
-        if (button == MouseButton::Right)
-        {
-            m_looking = false;
-        }
-        if (m_stroking && button == m_strokeButton)
-        {
-            m_stroking = false;
-        }
-        return;
+        m_looking = pressed;
+        m_lastMouseX = x;
+        m_lastMouseY = y;
     }
-
-    m_lastMouseX = x;
-    m_lastMouseY = y;
-    if (m_viewMode == ViewMode::View3D)
-    {
-        m_looking = button == MouseButton::Right;
-        return;
-    }
-
-    if (button != MouseButton::Left && button != MouseButton::Right)
-    {
-        return;
-    }
-    // Left paints the selected material, right erases
-    m_strokeMaterial = button == MouseButton::Left ? m_brushMaterial : MaterialEmpty;
-    m_strokeButton = button;
-    m_stroking = true;
-    ScreenToGrid(x, y, m_lastBrushX, m_lastBrushY);
-    m_world.Paint(int(floorf(m_lastBrushX)), int(floorf(m_lastBrushY)), m_brushRadius, m_strokeMaterial);
-}
-
-// Inverse of the cell lookup in grid_ps.hlsl: keep the scale/offset math identical
-void SandForge::ScreenToGrid(int screenX, int screenY, float& gridX, float& gridY) const
-{
-    const float scale = (std::min)(float(m_width) / GridWidth, float(m_height) / GridHeight);
-    const float offsetX = (float(m_width) - GridWidth * scale) * 0.5f;
-    const float offsetY = (float(m_height) - GridHeight * scale) * 0.5f;
-    // +0.5: SV_POSITION in the shader is the pixel center, the mouse gives the pixel's corner
-    gridX = (screenX + 0.5f - offsetX) / scale;
-    gridY = (screenY + 0.5f - offsetY) / scale;
-}
-
-// Stamps along the segment so fast strokes stay connected. The start point was stamped by the previous call.
-void SandForge::StampBrushLine(float fromX, float fromY, float toX, float toY)
-{
-    const float dx = toX - fromX;
-    const float dy = toY - fromY;
-    const float length = sqrtf(dx * dx + dy * dy);
-    // Stamps half a radius apart overlap enough to leave no gaps; at radius 0 every cell counts
-    const float spacing = (std::max)(0.5f * m_brushRadius, 0.5f);
-    const int stamps = (std::max)(1, int(ceilf(length / spacing)));
-    for (int i = 1; i <= stamps; ++i)
-    {
-        const float t = float(i) / stamps;
-        // floor, not int(): int() truncates toward zero, so -0.7 (outside the grid) would land in cell 0
-        m_world.Paint(int(floorf(fromX + dx * t)), int(floorf(fromY + dy * t)), m_brushRadius, m_strokeMaterial);
-    }
-}
-
-void SandForge::UpdateWindowTitle()
-{
-    const wchar_t* material = m_brushMaterial == MaterialWall ? L"Wall" : L"Sand";
-    const std::wstring text = std::wstring(L"[Z/X] ") + material
-        + L"  [Wheel] radius " + std::to_wstring(m_brushRadius)
-        + (m_paused ? L"  PAUSED (N: step)" : L"");
-    SetCustomWindowText(text.c_str());
 }
 
 void SandForge::OnMouseWheel(short delta)
 {
-    if (m_viewMode == ViewMode::View2D)
-    {
-        m_brushRadius = (std::clamp)(m_brushRadius + delta / WHEEL_DELTA, 0, MaxBrushRadius);
-        UpdateWindowTitle();
-        return;
-    }
-
     constexpr float radiansPerNotch = DirectX::XM_PI / 36.0f;
     m_fieldOfView -= static_cast<float>(delta) / WHEEL_DELTA * radiansPerNotch;
     m_fieldOfView = (std::clamp)(
@@ -727,7 +507,7 @@ void SandForge::OnRender()
     WaitForPreviousFrame();
 }
 
-// Per-frame skeleton shared by both views: reset -> back buffer to RENDER_TARGET -> draw -> back to PRESENT -> close.
+// Per-frame skeleton: reset -> back buffer to RENDER_TARGET -> draw -> back to PRESENT -> close.
 void SandForge::PopulateCommandList()
 {
     ThrowIfFailed(m_commandAllocator->Reset());
@@ -752,14 +532,7 @@ void SandForge::PopulateCommandList()
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     m_commandList->ResourceBarrier(1, &barrier);
 
-    if (m_viewMode == ViewMode::View2D)
-    {
-        RecordGrid2D();
-    }
-    else
-    {
-        RecordCube3D();
-    }
+    RecordScene();
 
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
@@ -767,7 +540,7 @@ void SandForge::PopulateCommandList()
     ThrowIfFailed(m_commandList->Close());
 }
 
-void SandForge::RecordCube3D()
+void SandForge::RecordScene()
 {
     // Get the current handle by frame index
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -800,47 +573,6 @@ void SandForge::RecordCube3D()
         0,
         0,
         0);
-}
-
-void SandForge::RecordGrid2D()
-{
-    // 1. Copy UPLOAD -> DEFAULT. Buffers decay to COMMON after every ExecuteCommandLists.
-    const UINT64 gridBytes = UINT64(GridWidth) * GridHeight * sizeof(UINT32);
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = m_gridBuffer.Get();
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    m_commandList->ResourceBarrier(1, &barrier);
-
-    m_commandList->CopyBufferRegion(m_gridBuffer.Get(), 0, m_gridUploadBuffer.Get(), 0, gridBytes);
-
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    m_commandList->ResourceBarrier(1, &barrier);
-
-    // 2. Bind the back buffer only: the 2D PSO has no depth buffer.
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    rtvHandle.ptr += static_cast<SIZE_T>(m_frameIndex) * m_rtvDescriptorSize;
-    m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-
-    const float letterboxColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    m_commandList->ClearRenderTargetView(rtvHandle, letterboxColor, 0, nullptr);
-
-    // 3. Bind root parameters and draw the fullscreen triangle.
-    const GridConstants constants = {
-        GridWidth, GridHeight, float(m_width), float(m_height)
-    };
-
-    m_commandList->SetGraphicsRootSignature(m_gridRootSignature.Get());
-    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
-    m_commandList->SetDescriptorHeaps(_countof(heaps), heaps);
-    m_commandList->SetGraphicsRoot32BitConstants(0, sizeof(constants) / 4, &constants, 0);
-    m_commandList->SetGraphicsRootDescriptorTable(1, m_srvHeap->GetGPUDescriptorHandleForHeapStart()); // one SRV table starting from t0
-    m_commandList->SetPipelineState(m_gridPipelineState.Get());
-    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    m_commandList->DrawInstanced(3, 1, 0, 0);
 }
 
 void SandForge::WaitForPreviousFrame()
@@ -931,9 +663,5 @@ void SandForge::OnDestroy()
     {
         m_cameraBuffer->Unmap(0, nullptr);
         m_mappedCameraConstants = nullptr;
-    }
-    if (m_gridUploadBuffer != nullptr && m_mappedGridUpload != nullptr) {
-        m_gridUploadBuffer->Unmap(0, nullptr);
-        m_mappedGridUpload = nullptr;
     }
 }
