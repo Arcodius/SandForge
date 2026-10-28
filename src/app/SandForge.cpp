@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "SandForge.h"
 
+#include "render/D3DUtil.h"
+
 SandForge::SandForge(UINT width, UINT height, std::wstring name) :
     DXSample(width, height, name),
     m_scissorRect{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) },
@@ -152,8 +154,8 @@ void SandForge::LoadPipeline()
 
 void SandForge::LoadGridPipeline()
 {
-    ComPtr<ID3DBlob> vertexShader = CompileShader(L"shaders\\grid_vs.hlsl", "VSMain", "vs_5_0");
-    ComPtr<ID3DBlob> pixelShader = CompileShader(L"shaders\\grid_ps.hlsl", "PSMain", "ps_5_0");
+    ComPtr<ID3DBlob> vertexShader = D3DUtil::CompileShaderFile(L"shaders\\grid_vs.hlsl", "VSMain", "vs_5_0");
+    ComPtr<ID3DBlob> pixelShader = D3DUtil::CompileShaderFile(L"shaders\\grid_ps.hlsl", "PSMain", "ps_5_0");
 
     D3D12_DESCRIPTOR_RANGE srvRange = {};
     srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -179,26 +181,9 @@ void SandForge::LoadGridPipeline()
     rootSignatureDesc.pParameters = params;
     rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
-    ComPtr<ID3DBlob> signature;
-    ComPtr<ID3DBlob> errors;
-    HRESULT hr = D3D12SerializeRootSignature(
-        &rootSignatureDesc,
-        D3D_ROOT_SIGNATURE_VERSION_1,
-        &signature,
-        &errors);
-    if (FAILED(hr))
-    {
-        if (errors != nullptr)
-        {
-            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
-        }
-        ThrowIfFailed(hr);
-    }
-    ThrowIfFailed(m_device->CreateRootSignature(
-        0,
-        signature->GetBufferPointer(),
-        signature->GetBufferSize(),
-        IID_PPV_ARGS(&m_gridRootSignature)));
+    m_gridRootSignature = D3DUtil::CreateRootSignature(
+        m_device.Get(), rootSignatureDesc
+    );
 
     // PSO
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc = {};
@@ -236,38 +221,14 @@ void SandForge::LoadGridPipeline()
         IID_PPV_ARGS(&m_gridPipelineState)));
 }
 
-ComPtr<ID3DBlob> SandForge::CompileShader(LPCWSTR assetName, LPCSTR entryPoint, LPCSTR target)
-{
-    ComPtr<ID3DBlob> shader;
-    ComPtr<ID3DBlob> errors;
-    const std::wstring shaderPath = GetAssetFullPath(assetName);
-    HRESULT hr = D3DCompileFromFile(
-        shaderPath.c_str(),
-        nullptr,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE,
-        entryPoint,
-        target,
-        D3DCOMPILE_ENABLE_STRICTNESS,
-        0,
-        &shader,
-        &errors);
-    if (FAILED(hr))
-    {
-        if (errors != nullptr)
-        {
-            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
-        }
-        ThrowIfFailed(hr);
-    }
-    return shader;
-}
+
 
 void SandForge::LoadAssets()
 {
     LoadCubeMesh();
 
-    ComPtr<ID3DBlob> vertexShader = CompileShader(L"shaders\\cube_vs.hlsl", "VSMain", "vs_5_0");
-    ComPtr<ID3DBlob> pixelShader = CompileShader(L"shaders\\cube_ps.hlsl", "PSMain", "ps_5_0");
+    ComPtr<ID3DBlob> vertexShader = D3DUtil::CompileShaderFile(L"shaders\\cube_vs.hlsl", "VSMain", "vs_5_0");
+    ComPtr<ID3DBlob> pixelShader = D3DUtil::CompileShaderFile(L"shaders\\cube_ps.hlsl", "PSMain", "ps_5_0");
     ComPtr<ID3DBlob> errors;
 
     D3D12_ROOT_PARAMETER rootParameter = {};
@@ -281,18 +242,9 @@ void SandForge::LoadAssets()
     rootSignatureDesc.pParameters = &rootParameter;
     rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
-    ComPtr<ID3DBlob> signature;
-    errors.Reset();
-    ThrowIfFailed(D3D12SerializeRootSignature(
-        &rootSignatureDesc,
-        D3D_ROOT_SIGNATURE_VERSION_1,
-        &signature,
-        &errors));
-    ThrowIfFailed(m_device->CreateRootSignature(
-        0,
-        signature->GetBufferPointer(),
-        signature->GetBufferSize(),
-        IID_PPV_ARGS(&m_rootSignature)));
+    m_rootSignature = D3DUtil::CreateRootSignature(
+        m_device.Get(), rootSignatureDesc
+    );
 
     const D3D12_INPUT_ELEMENT_DESC inputLayout[] =
     {
@@ -311,20 +263,7 @@ void SandForge::LoadAssets()
     pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // no back culling
     pipelineDesc.RasterizerState.DepthClipEnable = TRUE;
-    pipelineDesc.BlendState.AlphaToCoverageEnable = FALSE; // no blending
-    pipelineDesc.BlendState.IndependentBlendEnable = FALSE;
-    const D3D12_RENDER_TARGET_BLEND_DESC defaultBlend =
-    {
-        FALSE, FALSE,
-        D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
-        D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
-        D3D12_LOGIC_OP_NOOP,
-        D3D12_COLOR_WRITE_ENABLE_ALL
-    };
-    for (auto& renderTarget : pipelineDesc.BlendState.RenderTarget)
-    {
-        renderTarget = defaultBlend;
-    }
+    pipelineDesc.BlendState = D3DUtil::OpaqueBlendDesc();
     pipelineDesc.DepthStencilState.DepthEnable = TRUE; // enable depth test
     pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
     pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
@@ -338,24 +277,10 @@ void SandForge::LoadAssets()
     ThrowIfFailed(m_device->CreateGraphicsPipelineState( // create PSO
         &pipelineDesc,
         IID_PPV_ARGS(&m_pipelineState)));
-
-    D3D12_HEAP_PROPERTIES uploadHeap = {};
-    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD; // CPU write; GPU read
-    D3D12_RESOURCE_DESC bufferDesc = {};
-    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bufferDesc.Height = 1;
-    bufferDesc.DepthOrArraySize = 1;
-    bufferDesc.MipLevels = 1;
-    bufferDesc.SampleDesc.Count = 1;
-    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    bufferDesc.Width = m_cubeVertices.size() * sizeof(Vertex);
-    ThrowIfFailed(m_device->CreateCommittedResource( // create buffer
-        &uploadHeap,
-        D3D12_HEAP_FLAG_NONE,
-        &bufferDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&m_vertexBuffer)));
+    
+    m_vertexBuffer = D3DUtil::CreateBuffer(
+        m_device.Get(), D3D12_HEAP_TYPE_UPLOAD, m_cubeVertices.size() * sizeof(Vertex), D3D12_RESOURCE_STATE_GENERIC_READ
+    );
 
     void* mappedData = nullptr;
     D3D12_RANGE readRange = { 0, 0 }; // Indicates CPU does not read the memory
@@ -366,14 +291,9 @@ void SandForge::LoadAssets()
     m_vertexBufferView.StrideInBytes = sizeof(Vertex);
     m_vertexBufferView.SizeInBytes = static_cast<UINT>(m_cubeVertices.size() * sizeof(Vertex));
 
-    bufferDesc.Width = m_cubeIndices.size() * sizeof(UINT32);
-    ThrowIfFailed(m_device->CreateCommittedResource(
-        &uploadHeap,
-        D3D12_HEAP_FLAG_NONE,
-        &bufferDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&m_indexBuffer)));
+    m_indexBuffer = D3DUtil::CreateBuffer(
+        m_device.Get(), D3D12_HEAP_TYPE_UPLOAD, m_cubeIndices.size() * sizeof(UINT32), D3D12_RESOURCE_STATE_GENERIC_READ
+    );
     ThrowIfFailed(m_indexBuffer->Map(0, &readRange, &mappedData));
     memcpy(mappedData, m_cubeIndices.data(), m_cubeIndices.size() * sizeof(UINT32));
     m_indexBuffer->Unmap(0, nullptr);
@@ -382,14 +302,10 @@ void SandForge::LoadAssets()
     m_indexBufferView.Format = DXGI_FORMAT_R32_UINT;
     m_indexBufferView.SizeInBytes = static_cast<UINT>(m_cubeIndices.size() * sizeof(UINT32));
 
-    bufferDesc.Width = sizeof(CameraConstants);
-    ThrowIfFailed(m_device->CreateCommittedResource(
-        &uploadHeap,
-        D3D12_HEAP_FLAG_NONE,
-        &bufferDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&m_cameraBuffer)));
+    m_cameraBuffer = D3DUtil::CreateBuffer(
+        m_device.Get(), D3D12_HEAP_TYPE_UPLOAD, sizeof(CameraConstants),
+        D3D12_RESOURCE_STATE_GENERIC_READ
+    );
     ThrowIfFailed(m_cameraBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_mappedCameraConstants)));
     UpdateCameraConstants();
 }
@@ -506,6 +422,8 @@ void SandForge::CreateDepthBuffer(UINT width, UINT height)
     D3D12_HEAP_PROPERTIES heapProperties = {};
     heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT; // default heap: specific for GPU
 
+    // A depth buffer is a TEXTURE2D, not a buffer: Width/Height are pixels, it has a format,
+    // a driver-chosen layout and an optimized clear value. D3DUtil::CreateBuffer can't describe any of that.
     D3D12_RESOURCE_DESC depthDesc = {};
     depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     depthDesc.Width = width;
@@ -536,27 +454,12 @@ void SandForge::CreateDepthBuffer(UINT width, UINT height)
 
 void SandForge::CreateGridResources()
 {
-    const UINT64 gridBytes = UINT64(GridWidth) * GridHeight * sizeof(UINT32);
-
-    D3D12_RESOURCE_DESC bufferDesc = {};
-    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bufferDesc.Width = gridBytes;
-    bufferDesc.Height = 1;
-    bufferDesc.DepthOrArraySize = 1;
-    bufferDesc.MipLevels = 1;
-    bufferDesc.SampleDesc.Count = 1;
-    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-    D3D12_HEAP_PROPERTIES defaultHeap = {};
-    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
-    ThrowIfFailed(m_device->CreateCommittedResource(
-        &defaultHeap, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&m_gridBuffer)));
-    
-    D3D12_HEAP_PROPERTIES uploadHeap = {};
-    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
-    ThrowIfFailed(m_device->CreateCommittedResource(
-        &uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_gridUploadBuffer)
-    ));
+    m_gridBuffer = D3DUtil::CreateBuffer(
+        m_device.Get(), D3D12_HEAP_TYPE_DEFAULT, UINT64(GridWidth) * GridHeight * sizeof(UINT32), D3D12_RESOURCE_STATE_COMMON
+    );
+    m_gridUploadBuffer = D3DUtil::CreateBuffer(
+        m_device.Get(), D3D12_HEAP_TYPE_UPLOAD, UINT64(GridWidth) * GridHeight * sizeof(UINT32), D3D12_RESOURCE_STATE_GENERIC_READ
+    );
     D3D12_RANGE readRange = {0, 0}; // no read
     ThrowIfFailed(m_gridUploadBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_mappedGridUpload)));
 
